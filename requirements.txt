@@ -4,5 +4,7 @@ python-dotenv
 supabase
 pymupdf4llm
 google-genai
-pinecone
 python-multipart
+azure-search-documents
+azure-core
+openai
