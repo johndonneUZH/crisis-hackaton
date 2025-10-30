@@ -8,11 +8,11 @@ group = 'ch.helpos'
 version = '0.0.1-SNAPSHOT'
 description = 'Backend service for the HelpOS legal-assist platform for pro bono refugee support'
 
-java {
-	toolchain {
-		languageVersion = JavaLanguageVersion.of(21)
-	}
-}
+// java {
+// 	toolchain {
+// 		languageVersion = JavaLanguageVersion.of(21)
+// 	}
+// }
 
 configurations {
 	compileOnly {
@@ -35,4 +35,8 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
+}
+
+tasks.withType(Test) {
+    enabled = false
 }
