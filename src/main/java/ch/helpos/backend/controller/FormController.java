@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 @RestController
@@ -27,30 +28,78 @@ public class FormController extends AbstractController {
         super(mongoDatabase, neo4jDriver);
     }
 
-    // --- Helper: map MongoDB Document to Form ---
+    // --- Helpers ---
+    private void ensureTopicExists(String topicId) {
+        MongoCollection<Document> topics = mongoDatabase.getCollection("topics");
+        Document topic = topics.find(new Document("_id", parseObjectId(topicId, "Invalid topic id"))).first();
+        if (topic == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Topic not found");
+        }
+    }
+
+    private ObjectId parseObjectId(String id, String errorMessage) {
+        try {
+            return new ObjectId(id);
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, errorMessage);
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private Form mapDocToForm(Document doc) {
+        List<String> questionIds = doc.containsKey("questionIds")
+                ? (List<String>) doc.get("questionIds")
+                : Collections.emptyList();
+        List<String> tags = doc.containsKey("tags")
+                ? (List<String>) doc.get("tags")
+                : Collections.emptyList();
+
         return Form.builder()
                 .id(doc.getObjectId("_id").toString())
                 .title(doc.getString("title"))
                 .description(doc.getString("description"))
                 .version(doc.getString("version"))
-                .questions((List<String>) doc.get("questions"))
-                .tags((List<String>) doc.get("tags"))
+                .topicId(doc.getString("topicId"))
+                .previousVersionId(doc.getString("previousVersionId"))
+                .active(doc.getBoolean("active", true))
+                .questionIds(questionIds)
+                .tags(tags)
                 .build();
     }
 
-    // --- Create a form ---
+    // --- Create a form or a new form version ---
     @PostMapping
     public ResponseEntity<Form> createForm(@PathVariable String topicId, @RequestBody Form form) {
+        ensureTopicExists(topicId);
+
         MongoCollection<Document> forms = mongoDatabase.getCollection("forms");
+        List<String> questionIds = form.getQuestionIds() != null ? form.getQuestionIds() : new ArrayList<>();
+        List<String> tags = form.getTags() != null ? form.getTags() : new ArrayList<>();
+
+        String previousVersionId = form.getPreviousVersionId();
+        if (previousVersionId != null) {
+            ObjectId previousObjectId = parseObjectId(previousVersionId, "Invalid previous form id");
+            Document previous = forms.find(new Document("_id", previousObjectId))
+                    .first();
+            if (previous == null) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Previous form version not found");
+            }
+            if (!topicId.equals(previous.getString("topicId"))) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Previous form does not belong to this topic");
+            }
+            // Mark older version as inactive
+            forms.updateOne(new Document("_id", previousObjectId),
+                    new Document("$set", new Document("active", false)));
+        }
 
         Document doc = new Document("title", form.getTitle())
                 .append("description", form.getDescription())
                 .append("version", form.getVersion())
-                .append("questions", form.getQuestions())
-                .append("tags", form.getTags())
-                .append("topicId", topicId); // link to topic
+                .append("topicId", topicId)
+                .append("previousVersionId", previousVersionId)
+                .append("active", true)
+                .append("questionIds", questionIds)
+                .append("tags", tags);
 
         forms.insertOne(doc);
         String formId = doc.getObjectId("_id").toString();
@@ -58,6 +107,10 @@ public class FormController extends AbstractController {
         // --- Neo4j ---
         createNode("Form", formId);
         createRelation("Form", formId, "BELONGS_TO", "Topic", topicId);
+        if (previousVersionId != null) {
+            createRelation("Form", formId, "VERSION_OF", "Form", previousVersionId);
+            createRelation("Form", previousVersionId, "SUPERSEDED_BY", "Form", formId);
+        }
 
         return ResponseEntity.status(HttpStatus.CREATED).body(mapDocToForm(doc));
     }
@@ -85,6 +138,8 @@ public class FormController extends AbstractController {
     // --- Get all forms under a topic ---
     @GetMapping
     public ResponseEntity<List<Form>> getAllForms(@PathVariable String topicId) {
+        ensureTopicExists(topicId);
+
         MongoCollection<Document> forms = mongoDatabase.getCollection("forms");
         List<Form> result = new ArrayList<>();
 

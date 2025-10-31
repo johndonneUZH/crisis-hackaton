@@ -1,7 +1,8 @@
 package ch.helpos.backend.models;
 
-import lombok.Data;
 import lombok.Builder;
+import lombok.Data;
+
 import java.util.List;
 
 @Data
@@ -10,7 +11,10 @@ public class Question {
     private String id;
     private String text;
     private List<String> subQuestionIds;
-    private List<String> answers;
+    private String topicId;
     private String formId;
     private String source;
+    private String answerType;
+    private List<AnswerOption> answerOptions;
+    private List<String> tags;
 }

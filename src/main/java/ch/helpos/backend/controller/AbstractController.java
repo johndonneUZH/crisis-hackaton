@@ -14,23 +14,23 @@ public abstract class AbstractController {
         this.neo4jDriver = neo4jDriver;
     }
 
-    /** Create a Neo4j node with given label and id */
+    /** Create or deduplicate a Neo4j node with given label and id */
     protected void createNode(String label, String id) {
         try (Session session = neo4jDriver.session()) {
             session.executeWrite(tx -> {
-                tx.run("CREATE (n:" + label + " {id: $id})", Values.parameters("id", id));
+                tx.run("MERGE (n:" + label + " {id: $id})", Values.parameters("id", id));
                 return null; // executeWrite expects a return
             });
         }
     }
 
-    /** Create a Neo4j relationship between two nodes by id */
+    /** Create a Neo4j relationship between two nodes by id (idempotent) */
     protected void createRelation(String fromLabel, String fromId, String relType, String toLabel, String toId) {
         try (Session session = neo4jDriver.session()) {
             session.executeWrite(tx -> {
                 tx.run("""
                     MATCH (a:%s {id: $fromId}), (b:%s {id: $toId})
-                    CREATE (a)-[r:%s]->(b)
+                    MERGE (a)-[:%s]->(b)
                     """.formatted(fromLabel, toLabel, relType),
                     Values.parameters("fromId", fromId, "toId", toId));
                 return null;
