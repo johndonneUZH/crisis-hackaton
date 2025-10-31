@@ -4,22 +4,26 @@ import lombok.Builder;
 import lombok.Data;
 
 import java.time.Instant;
+import java.util.List;
+
 @Data
 @Builder
-public class Case {
+public class CaseRun {
     private String id;
-    private String title;
-    private String description;
-    private String status;
+    private String caseId;
     private String topicId;
     private String formId;
-    private String formVersion;
     private String profileId;
-    private boolean extended;
+    private String lawyerId;
+    private String status;
+    private Boolean extended;
     private String outcome;
     private String closureNotes;
-    private java.util.List<String> tags;
-    private java.util.List<String> attachmentIds;
+    private List<CaseStep> steps;
+    private List<String> answeredQuestionIds;
+    private List<String> tags;
+    private List<String> attachmentIds;
     private Instant createdAt;
+    private Instant updatedAt;
     private Instant completedAt;
 }
