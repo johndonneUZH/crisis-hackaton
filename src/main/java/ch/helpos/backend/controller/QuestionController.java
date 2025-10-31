@@ -57,14 +57,14 @@ public class QuestionController extends AbstractController {
         return formDoc;
     }
 
-    @SuppressWarnings("unchecked")
     private Question mapDocToQuestion(Document doc) {
-        List<String> subQuestionIds = doc.containsKey("subQuestionIds")
-                ? (List<String>) doc.get("subQuestionIds")
-                : Collections.emptyList();
+        String parentQuestionId = doc.getString("parentQuestionId");
+        String parentAnswerId = doc.getString("parentAnswerId");
+        @SuppressWarnings("unchecked")
         List<String> tags = doc.containsKey("tags")
                 ? (List<String>) doc.get("tags")
                 : Collections.emptyList();
+        @SuppressWarnings("unchecked")
         List<Document> optionsDocs = doc.containsKey("answerOptions")
                 ? (List<Document>) doc.get("answerOptions")
                 : Collections.emptyList();
@@ -73,7 +73,8 @@ public class QuestionController extends AbstractController {
         return Question.builder()
                 .id(doc.getObjectId("_id").toString())
                 .text(doc.getString("text"))
-                .subQuestionIds(subQuestionIds)
+                .parentQuestionId(parentQuestionId)
+                .parentAnswerId(parentAnswerId)
                 .topicId(doc.getString("topicId"))
                 .formId(doc.getString("formId"))
                 .source(doc.getString("source"))
@@ -126,7 +127,7 @@ public class QuestionController extends AbstractController {
                                                    @PathVariable String formId,
                                                    @RequestBody Question question) {
         requireForm(topicId, formId);
-        return ResponseEntity.status(HttpStatus.CREATED).body(mapDocToQuestion(saveQuestion(topicId, formId, null, question)));
+        return ResponseEntity.status(HttpStatus.CREATED).body(mapDocToQuestion(saveQuestion(topicId, formId, null, null, question)));
     }
 
     // --- Create a subquestion under a parent question ---
@@ -136,6 +137,10 @@ public class QuestionController extends AbstractController {
                                                       @PathVariable String parentQuestionId,
                                                       @RequestBody Question question) {
         requireForm(topicId, formId);
+        String parentAnswerId = question.getParentAnswerId();
+        if (parentAnswerId == null || parentAnswerId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "parentAnswerId is required to create a subquestion");
+        }
 
         MongoCollection<Document> questions = mongoDatabase.getCollection("questions");
         ObjectId parentId;
@@ -152,30 +157,39 @@ public class QuestionController extends AbstractController {
         if (parent == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Parent question not found");
         }
+        @SuppressWarnings("unchecked")
+        List<Document> parentAnswerOptions = parent.containsKey("answerOptions")
+                ? (List<Document>) parent.get("answerOptions")
+                : Collections.emptyList();
+        boolean parentAnswerExists = parentAnswerOptions.stream()
+                .anyMatch(option -> parentAnswerId.equals(option.getString("id")));
+        if (!parentAnswerExists) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Parent answer option not found");
+        }
 
-        Document subQuestionDoc = saveQuestion(topicId, formId, parentQuestionId, question);
+        Document subQuestionDoc = saveQuestion(topicId, formId, parentQuestionId, parentAnswerId, question);
         String subQuestionId = subQuestionDoc.getObjectId("_id").toString();
 
-        // Update parent question to include this subQuestionId
         questions.updateOne(
-                new Document("_id", new ObjectId(parentQuestionId)),
-                new Document("$addToSet", new Document("subQuestionIds", subQuestionId))
+                new Document("_id", parentId)
+                        .append("answerOptions.id", parentAnswerId),
+                new Document("$set", new Document("answerOptions.$.nextQuestionId", subQuestionId))
         );
 
         return ResponseEntity.status(HttpStatus.CREATED).body(mapDocToQuestion(subQuestionDoc));
     }
 
     // --- Save question to MongoDB and Neo4j ---
-    private Document saveQuestion(String topicId, String formId, String parentQuestionId, Question question) {
+    private Document saveQuestion(String topicId, String formId, String parentQuestionId, String parentAnswerId, Question question) {
         MongoCollection<Document> forms = mongoDatabase.getCollection("forms");
         MongoCollection<Document> questions = mongoDatabase.getCollection("questions");
 
         Document doc = new Document("text", question.getText())
-                .append("subQuestionIds", new ArrayList<String>()) // initially empty
                 .append("source", question.getSource())
                 .append("topicId", topicId)
                 .append("formId", formId)
                 .append("parentQuestionId", parentQuestionId)
+                .append("parentAnswerId", parentAnswerId)
                 .append("answerType", question.getAnswerType())
                 .append("answerOptions", mapAnswerOptionsToDocs(question.getAnswerOptions()))
                 .append("tags", question.getTags() != null ? question.getTags() : new ArrayList<String>());

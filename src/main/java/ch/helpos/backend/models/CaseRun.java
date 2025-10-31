@@ -2,28 +2,24 @@ package ch.helpos.backend.models;
 
 import lombok.Builder;
 import lombok.Data;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
 import java.util.List;
 
-@Data
 @Builder
+@Data
+@Document(collection = "runs")
 public class CaseRun {
+    @Id
     private String id;
-    private String caseId;
-    private String topicId;
-    private String formId;
     private String profileId;
-    private String lawyerId;
-    private String status;
-    private Boolean extended;
-    private String outcome;
-    private String closureNotes;
+    private String formId;
+    private String topicId;
     private List<CaseStep> steps;
-    private List<String> answeredQuestionIds;
-    private List<String> tags;
-    private List<String> attachmentIds;
-    private Instant createdAt;
-    private Instant updatedAt;
-    private Instant completedAt;
+    private String outcome;
+    private String status; // e.g., "RUNNING", "COMPLETED"
+    private Instant startedAt;
+    private Instant closedAt;
 }

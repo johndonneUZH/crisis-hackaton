@@ -10,7 +10,8 @@ import java.util.List;
 public class Question {
     private String id;
     private String text;
-    private List<String> subQuestionIds;
+    private String parentQuestionId;
+    private String parentAnswerId;
     private String topicId;
     private String formId;
     private String source;

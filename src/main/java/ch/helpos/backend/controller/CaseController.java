@@ -1,6 +1,8 @@
 package ch.helpos.backend.controller;
 
 import ch.helpos.backend.models.Case;
+import ch.helpos.backend.models.CaseRun;
+import ch.helpos.backend.models.CaseStep;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import org.bson.Document;
@@ -11,6 +13,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -19,50 +22,279 @@ import org.springframework.web.server.ResponseStatusException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 @RestController
-@RequestMapping("/topics/{topicId}/forms/{formId}/cases")
+@RequestMapping("/topics/{topicId}/forms/{formId}")
 public class CaseController extends AbstractController {
+
+    private final MongoCollection<Document> runCollection;
+    private final MongoCollection<Document> caseCollection;
 
     public CaseController(MongoDatabase mongoDatabase, Driver neo4jDriver) {
         super(mongoDatabase, neo4jDriver);
+        this.runCollection = mongoDatabase.getCollection("runs");
+        this.caseCollection = mongoDatabase.getCollection("cases");
     }
 
-    // --- Helpers ---
+    @PostMapping("/runs")
+    public ResponseEntity<CaseRun> createRun(@PathVariable String topicId,
+                                             @PathVariable String formId,
+                                             @RequestBody CaseRun payload) {
+        Instant now = Instant.now();
+        Document doc = new Document("topicId", topicId)
+                .append("formId", formId)
+                .append("profileId", payload.getProfileId())
+                .append("status", payload.getStatus() != null ? payload.getStatus() : "RUNNING")
+                .append("startedAt", Date.from(payload.getStartedAt() != null ? payload.getStartedAt() : now));
 
-    private ObjectId parseObjectId(String id, String message) {
+        if (payload.getSteps() != null) {
+            doc.append("steps", mapStepsToDocuments(payload.getSteps()));
+        }
+        if (payload.getOutcome() != null) {
+            doc.append("outcome", payload.getOutcome());
+        }
+        if (payload.getClosedAt() != null) {
+            doc.append("closedAt", Date.from(payload.getClosedAt()));
+        }
+
+        runCollection.insertOne(doc);
+        return ResponseEntity.status(HttpStatus.CREATED).body(mapRun(doc));
+    }
+
+    @GetMapping("/runs/{runId}")
+    public ResponseEntity<CaseRun> getRun(@PathVariable String topicId,
+                                          @PathVariable String formId,
+                                          @PathVariable String runId) {
+        Document doc = findRun(topicId, formId, runId);
+        return ResponseEntity.ok(mapRun(doc));
+    }
+
+    @PutMapping("/runs/{runId}")
+    public ResponseEntity<CaseRun> updateRun(@PathVariable String topicId,
+                                             @PathVariable String formId,
+                                             @PathVariable String runId,
+                                             @RequestBody CaseRun payload) {
+        Document existing = findRun(topicId, formId, runId);
+        Document updates = new Document();
+
+        if (payload.getProfileId() != null) {
+            updates.append("profileId", payload.getProfileId());
+        }
+        if (payload.getStatus() != null) {
+            updates.append("status", payload.getStatus());
+        }
+        if (payload.getOutcome() != null) {
+            updates.append("outcome", payload.getOutcome());
+        }
+        if (payload.getStartedAt() != null) {
+            updates.append("startedAt", Date.from(payload.getStartedAt()));
+        }
+        if (payload.getClosedAt() != null) {
+            updates.append("closedAt", Date.from(payload.getClosedAt()));
+        }
+        if (payload.getSteps() != null) {
+            updates.append("steps", mapStepsToDocuments(payload.getSteps()));
+        }
+
+        if (!updates.isEmpty()) {
+            updates.append("updatedAt", Date.from(Instant.now()));
+            runCollection.updateOne(new Document("_id", existing.getObjectId("_id")), new Document("$set", updates));
+        }
+
+        Document updated = findRun(topicId, formId, runId);
+        return ResponseEntity.ok(mapRun(updated));
+    }
+
+    @GetMapping("/cases")
+    public ResponseEntity<List<Case>> listCases(@PathVariable String topicId,
+                                                @PathVariable String formId) {
+        List<Document> docs = caseCollection.find(new Document("topicId", topicId).append("formId", formId))
+                .into(new ArrayList<>());
+        docs.sort(Comparator.comparing((Document d) -> d.getInteger("frequency", 0)).reversed());
+        return ResponseEntity.ok(docs.stream().map(this::mapCase).collect(Collectors.toList()));
+    }
+
+    @GetMapping("/cases/{caseId}")
+    public ResponseEntity<Case> getCase(@PathVariable String topicId,
+                                        @PathVariable String formId,
+                                        @PathVariable String caseId) {
+        Document doc = findCase(topicId, formId, caseId);
+        return ResponseEntity.ok(mapCase(doc));
+    }
+
+    @GetMapping("/runs/{runId}/similar")
+    public ResponseEntity<List<Case>> findSimilarCases(@PathVariable String topicId,
+                                                       @PathVariable String formId,
+                                                       @PathVariable String runId) {
+        Document runDoc = findRun(topicId, formId, runId);
+        CaseRun run = mapRun(runDoc);
+        List<CaseStep> runSteps = run.getSteps() != null ? run.getSteps() : Collections.emptyList();
+        if (runSteps.isEmpty()) {
+            return ResponseEntity.ok(Collections.emptyList());
+        }
+
+        List<Document> candidateDocs = caseCollection.find(new Document("topicId", topicId).append("formId", formId))
+                .into(new ArrayList<>());
+        List<CaseScore> scored = new ArrayList<>();
+
+        for (Document doc : candidateDocs) {
+            Case candidate = mapCase(doc);
+            double score = scoreCase(runSteps, candidate.getSteps() != null ? candidate.getSteps() : Collections.emptyList());
+            if (score > 0d) {
+                scored.add(new CaseScore(candidate, score));
+            }
+        }
+
+        scored.sort(Comparator.<CaseScore>comparingDouble(CaseScore::score).reversed()
+                .thenComparing(cs -> cs.caseData().getFrequency(), Comparator.nullsLast(Comparator.reverseOrder())));
+
+        List<Case> result = scored.stream()
+                .limit(5)
+                .map(CaseScore::caseData)
+                .collect(Collectors.toList());
+
+        return ResponseEntity.ok(result);
+    }
+
+    @PostMapping("/runs/{runId}/close")
+    public ResponseEntity<Case> closeRun(@PathVariable String topicId,
+                                         @PathVariable String formId,
+                                         @PathVariable String runId,
+                                         @RequestBody(required = false) CaseRun closure) {
+        Document runDoc = findRun(topicId, formId, runId);
+        CaseRun run = mapRun(runDoc);
+
+        List<CaseStep> finalSteps = closure != null && closure.getSteps() != null
+                ? closure.getSteps()
+                : (run.getSteps() != null ? run.getSteps() : Collections.emptyList());
+
+        if (finalSteps.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Cannot close a run without recorded steps");
+        }
+
+        String outcome = closure != null && closure.getOutcome() != null
+                ? closure.getOutcome()
+                : run.getOutcome();
+
+        if (outcome == null || outcome.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Outcome is required to close a run");
+        }
+
+        Instant closedAt = closure != null && closure.getClosedAt() != null ? closure.getClosedAt() : Instant.now();
+        runCollection.updateOne(
+                new Document("_id", runDoc.getObjectId("_id")),
+                new Document("$set", new Document("steps", mapStepsToDocuments(finalSteps))
+                        .append("outcome", outcome)
+                        .append("status", "COMPLETED")
+                        .append("closedAt", Date.from(closedAt)))
+        );
+
+        Case aggregated = upsertCase(topicId, formId, run.getProfileId(), finalSteps, outcome);
+        return ResponseEntity.ok(aggregated);
+    }
+
+    private Case upsertCase(String topicId,
+                            String formId,
+                            String profileId,
+                            List<CaseStep> steps,
+                            String outcome) {
+        List<Document> candidates = caseCollection.find(new Document("topicId", topicId)
+                        .append("formId", formId)
+                        .append("outcome", outcome))
+                .into(new ArrayList<>());
+
+        for (Document candidate : candidates) {
+            List<CaseStep> candidateSteps = mapStepsFromDocuments(candidate.getList("steps", Document.class, Collections.emptyList()));
+            if (stepsEqual(steps, candidateSteps)) {
+                caseCollection.updateOne(
+                        new Document("_id", candidate.getObjectId("_id")),
+                        new Document("$inc", new Document("frequency", 1))
+                                .append("$set", new Document("completedAt", Date.from(Instant.now()))));
+                Document updated = caseCollection.find(new Document("_id", candidate.getObjectId("_id"))).first();
+                return mapCase(Objects.requireNonNull(updated));
+            }
+        }
+
+        Instant now = Instant.now();
+        List<Document> stepDocs = mapStepsToDocuments(steps);
+        List<String> answeredIds = steps.stream()
+                .map(CaseStep::getQuestionId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
+        Document newDoc = new Document("topicId", topicId)
+                .append("formId", formId)
+                .append("profileId", profileId)
+                .append("status", "CLOSED")
+                .append("outcome", outcome)
+                .append("frequency", 1)
+                .append("steps", stepDocs)
+                .append("answeredQuestionIds", answeredIds)
+                .append("title", outcome != null && !outcome.isBlank() ? outcome : "Case")
+                .append("description", "")
+                .append("closureNotes", "")
+                .append("createdAt", Date.from(now))
+                .append("completedAt", Date.from(now));
+
+        caseCollection.insertOne(newDoc);
+        return mapCase(newDoc);
+    }
+
+    private Document findRun(String topicId, String formId, String runId) {
+        Document filter = new Document("_id", parseId(runId))
+                .append("topicId", topicId)
+                .append("formId", formId);
+        Document doc = runCollection.find(filter).first();
+        if (doc == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Run not found");
+        }
+        return doc;
+    }
+
+    private Document findCase(String topicId, String formId, String caseId) {
+        Document filter = new Document("_id", parseId(caseId))
+                .append("topicId", topicId)
+                .append("formId", formId);
+        Document doc = caseCollection.find(filter).first();
+        if (doc == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Case not found");
+        }
+        return doc;
+    }
+
+    private ObjectId parseId(String rawId) {
         try {
-            return new ObjectId(id);
+            return new ObjectId(rawId);
         } catch (IllegalArgumentException ex) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid identifier");
         }
     }
 
-    private Document requireForm(String topicId, String formId) {
-        MongoCollection<Document> forms = mongoDatabase.getCollection("forms");
-        Document formDoc = forms.find(new Document("_id", parseObjectId(formId, "Invalid form id"))).first();
-        if (formDoc == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Form not found");
-        }
-        if (!topicId.equals(formDoc.getString("topicId"))) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Form does not belong to the provided topic");
-        }
-        return formDoc;
+    private CaseRun mapRun(Document doc) {
+        List<CaseStep> steps = mapStepsFromDocuments(doc.getList("steps", Document.class, Collections.emptyList()));
+        return CaseRun.builder()
+                .id(doc.getObjectId("_id").toHexString())
+                .profileId(doc.getString("profileId"))
+                .formId(doc.getString("formId"))
+                .topicId(doc.getString("topicId"))
+                .steps(steps)
+                .outcome(doc.getString("outcome"))
+                .status(doc.getString("status"))
+                .startedAt(toInstant(doc.getDate("startedAt")))
+                .closedAt(toInstant(doc.getDate("closedAt")))
+                .build();
     }
 
-    @SuppressWarnings("unchecked")
-    private Case mapDocToCase(Document doc) {
-        List<String> tags = doc.containsKey("tags") ? (List<String>) doc.get("tags") : Collections.emptyList();
-        List<String> attachments = doc.containsKey("attachmentIds")
-                ? (List<String>) doc.get("attachmentIds")
-                : Collections.emptyList();
-        Date createdAt = doc.getDate("createdAt");
-        Date completedAt = doc.getDate("completedAt");
-
+    private Case mapCase(Document doc) {
+        List<CaseStep> steps = mapStepsFromDocuments(doc.getList("steps", Document.class, Collections.emptyList()));
         return Case.builder()
-                .id(doc.getObjectId("_id").toString())
+                .id(doc.getObjectId("_id").toHexString())
                 .title(doc.getString("title"))
                 .description(doc.getString("description"))
                 .status(doc.getString("status"))
@@ -70,130 +302,116 @@ public class CaseController extends AbstractController {
                 .formId(doc.getString("formId"))
                 .formVersion(doc.getString("formVersion"))
                 .profileId(doc.getString("profileId"))
-                .extended(doc.getBoolean("extended", false))
                 .outcome(doc.getString("outcome"))
                 .closureNotes(doc.getString("closureNotes"))
-                .tags(tags)
-                .attachmentIds(attachments)
-                .createdAt(createdAt != null ? createdAt.toInstant() : null)
-                .completedAt(completedAt != null ? completedAt.toInstant() : null)
+                .createdAt(toInstant(doc.getDate("createdAt")))
+                .completedAt(toInstant(doc.getDate("completedAt")))
+                .steps(steps)
+                .answeredQuestionIds(doc.getList("answeredQuestionIds", String.class))
+                .frequency(doc.getInteger("frequency", 0))
                 .build();
     }
 
-    // --- Routes ---
-
-    @PostMapping
-    public ResponseEntity<Case> createCase(@PathVariable String topicId,
-                                           @PathVariable String formId,
-                                           @RequestBody Case legalCase) {
-        Document formDoc = requireForm(topicId, formId);
-
-        MongoCollection<Document> cases = mongoDatabase.getCollection("cases");
-
-        String status = legalCase.getStatus() != null ? legalCase.getStatus() : "OPEN";
-        String formVersion = legalCase.getFormVersion() != null ? legalCase.getFormVersion() : formDoc.getString("version");
-        Instant createdAt = legalCase.getCreatedAt() != null ? legalCase.getCreatedAt() : Instant.now();
-        Instant completedAt = legalCase.getCompletedAt();
-
-        List<String> tags = legalCase.getTags() != null ? legalCase.getTags() : new ArrayList<>();
-        List<String> attachmentIds = legalCase.getAttachmentIds() != null ? legalCase.getAttachmentIds() : new ArrayList<>();
-        boolean extendedFlag = legalCase.isExtended();
-
-        Document doc = new Document("title", legalCase.getTitle())
-                .append("description", legalCase.getDescription())
-                .append("status", status)
-                .append("topicId", topicId)
-                .append("formId", formId)
-                .append("formVersion", formVersion)
-                .append("profileId", legalCase.getProfileId())
-                .append("extended", extendedFlag)
-                .append("outcome", legalCase.getOutcome())
-                .append("closureNotes", legalCase.getClosureNotes())
-                .append("tags", tags)
-                .append("attachmentIds", attachmentIds)
-                .append("createdAt", Date.from(createdAt));
-        if (completedAt != null) {
-            doc.append("completedAt", Date.from(completedAt));
+    private List<Document> mapStepsToDocuments(List<CaseStep> steps) {
+        if (steps == null) {
+            return Collections.emptyList();
         }
-
-        cases.insertOne(doc);
-        String id = doc.getObjectId("_id").toString();
-
-        // --- Graph sync ---
-        createNode("Case", id);
-        createRelation("Case", id, "BELONGS_TO", "Form", formId);
-        createRelation("Case", id, "BELONGS_TO", "Topic", topicId);
-        if (legalCase.getProfileId() != null) {
-            createRelation("Case", id, "FOR_PROFILE", "Profile", legalCase.getProfileId());
-        }
-
-        return ResponseEntity.status(HttpStatus.CREATED).body(mapDocToCase(doc));
+        return steps.stream().map(step -> {
+            Document doc = new Document();
+            if (step.getQuestionId() != null) {
+                doc.append("questionId", step.getQuestionId());
+            }
+            if (step.getAnswer() != null) {
+                doc.append("answer", step.getAnswer());
+            }
+            if (step.getNotes() != null) {
+                doc.append("notes", step.getNotes());
+            }
+            if (step.getAttachmentIds() != null) {
+                doc.append("attachmentIds", step.getAttachmentIds());
+            }
+            if (step.getAnsweredAt() != null) {
+                doc.append("answeredAt", Date.from(step.getAnsweredAt()));
+            }
+            return doc;
+        }).collect(Collectors.toList());
     }
 
-    @GetMapping("/{caseId}")
-    public ResponseEntity<Case> getCaseById(@PathVariable String topicId,
-                                            @PathVariable String formId,
-                                            @PathVariable String caseId) {
-        requireForm(topicId, formId);
+    private List<CaseStep> mapStepsFromDocuments(List<Document> docs) {
+        if (docs == null || docs.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return docs.stream()
+                .map(this::mapStep)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
 
-        MongoCollection<Document> cases = mongoDatabase.getCollection("cases");
-        Document doc = cases.find(new Document("_id", parseObjectId(caseId, "Invalid case id"))
-                .append("formId", formId))
-                .first();
+    private CaseStep mapStep(Document doc) {
         if (doc == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Case not found");
+            return null;
         }
-
-        return ResponseEntity.ok(mapDocToCase(doc));
+        return CaseStep.builder()
+                .questionId(doc.getString("questionId"))
+                .answer(doc.getString("answer"))
+                .notes(doc.getString("notes"))
+                .attachmentIds(doc.getList("attachmentIds", String.class))
+                .answeredAt(toInstant(doc.getDate("answeredAt")))
+                .build();
     }
 
-    @GetMapping
-    public ResponseEntity<List<Case>> getAllCases(@PathVariable String topicId,
-                                                  @PathVariable String formId) {
-        requireForm(topicId, formId);
-
-        MongoCollection<Document> cases = mongoDatabase.getCollection("cases");
-        List<Case> result = new ArrayList<>();
-        for (Document doc : cases.find(new Document("formId", formId))) {
-            result.add(mapDocToCase(doc));
-        }
-        return ResponseEntity.ok(result);
+    private Instant toInstant(Date date) {
+        return date != null ? date.toInstant() : null;
     }
 
-    @PostMapping("/{caseId}/close")
-    public ResponseEntity<Case> closeCase(@PathVariable String topicId,
-                                          @PathVariable String formId,
-                                          @PathVariable String caseId,
-                                          @RequestBody Case caseUpdate) {
-        requireForm(topicId, formId);
-
-        MongoCollection<Document> cases = mongoDatabase.getCollection("cases");
-        ObjectId caseObjectId = parseObjectId(caseId, "Invalid case id");
-        Document current = cases.find(new Document("_id", caseObjectId).append("formId", formId)).first();
-        if (current == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Case not found");
+    private boolean stepsEqual(List<CaseStep> a, List<CaseStep> b) {
+        if (a.size() != b.size()) {
+            return false;
         }
-
-        boolean extendedFlag = caseUpdate.isExtended();
-        String status = caseUpdate.getStatus() != null ? caseUpdate.getStatus() : (extendedFlag ? "EXTENDED" : "CLOSED");
-        Instant completionTime = caseUpdate.getCompletedAt() != null ? caseUpdate.getCompletedAt() : Instant.now();
-
-        Document setDoc = new Document("status", status)
-                .append("extended", extendedFlag)
-                .append("outcome", caseUpdate.getOutcome())
-                .append("closureNotes", caseUpdate.getClosureNotes())
-                .append("completedAt", Date.from(completionTime));
-        if (caseUpdate.getTags() != null) {
-            setDoc.append("tags", caseUpdate.getTags());
+        for (int i = 0; i < a.size(); i++) {
+            CaseStep left = a.get(i);
+            CaseStep right = b.get(i);
+            if (!Objects.equals(normalize(left.getQuestionId()), normalize(right.getQuestionId()))) {
+                return false;
+            }
+            if (!Objects.equals(normalize(left.getAnswer()), normalize(right.getAnswer()))) {
+                return false;
+            }
         }
-        if (caseUpdate.getAttachmentIds() != null) {
-            setDoc.append("attachmentIds", caseUpdate.getAttachmentIds());
-        }
-
-        cases.updateOne(new Document("_id", caseObjectId),
-                new Document("$set", setDoc));
-
-        Document updated = cases.find(new Document("_id", caseObjectId)).first();
-        return ResponseEntity.ok(mapDocToCase(updated));
+        return true;
     }
+
+    private double scoreCase(List<CaseStep> reference, List<CaseStep> candidate) {
+        if (reference.isEmpty() || candidate.isEmpty()) {
+            return 0d;
+        }
+        Map<String, String> referenceMap = reference.stream()
+                .filter(step -> step.getQuestionId() != null)
+                .collect(Collectors.toMap(
+                        step -> normalize(step.getQuestionId()),
+                        step -> normalize(step.getAnswer()),
+                        (first, second) -> second,
+                        java.util.LinkedHashMap::new));
+
+        Map<String, String> candidateMap = candidate.stream()
+                .filter(step -> step.getQuestionId() != null)
+                .collect(Collectors.toMap(
+                        step -> normalize(step.getQuestionId()),
+                        step -> normalize(step.getAnswer()),
+                        (first, second) -> second,
+                        java.util.LinkedHashMap::new));
+
+        long matches = referenceMap.entrySet().stream()
+                .filter(entry -> Objects.equals(entry.getValue(), candidateMap.get(entry.getKey())))
+                .count();
+
+        int denominator = Math.max(referenceMap.size(), candidateMap.size());
+        return denominator == 0 ? 0d : (double) matches / denominator;
+    }
+
+    private String normalize(String value) {
+        return value == null ? null : value.trim().toLowerCase();
+    }
+
+    private record CaseScore(Case caseData, double score) {}
 }
