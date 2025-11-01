@@ -187,15 +187,17 @@ public class CaseController extends AbstractController {
         }
 
         Instant closedAt = closure != null && closure.getClosedAt() != null ? closure.getClosedAt() : Instant.now();
+        String closureNotes = closure != null && closure.getClosureNotes() != null ? closure.getClosureNotes() : run.getClosureNotes();
         runCollection.updateOne(
                 new Document("_id", runDoc.getObjectId("_id")),
                 new Document("$set", new Document("steps", mapStepsToDocuments(finalSteps))
                         .append("outcome", outcome)
                         .append("status", "COMPLETED")
-                        .append("closedAt", Date.from(closedAt)))
+                        .append("closedAt", Date.from(closedAt))
+                        .append("closureNotes", closureNotes))
         );
 
-        Case aggregated = upsertCase(topicId, formId, run.getProfileId(), finalSteps, outcome);
+        Case aggregated = upsertCase(topicId, formId, run.getProfileId(), finalSteps, outcome, closureNotes);
         return ResponseEntity.ok(aggregated);
     }
 
@@ -203,7 +205,8 @@ public class CaseController extends AbstractController {
                             String formId,
                             String profileId,
                             List<CaseStep> steps,
-                            String outcome) {
+                            String outcome,
+                            String closureNotes) {
         List<Document> candidates = caseCollection.find(new Document("topicId", topicId)
                         .append("formId", formId)
                         .append("outcome", outcome))
@@ -212,10 +215,14 @@ public class CaseController extends AbstractController {
         for (Document candidate : candidates) {
             List<CaseStep> candidateSteps = mapStepsFromDocuments(candidate.getList("steps", Document.class, Collections.emptyList()));
             if (stepsEqual(steps, candidateSteps)) {
+                Document setDoc = new Document("completedAt", Date.from(Instant.now()));
+                if (closureNotes != null && !closureNotes.isBlank()) {
+                    setDoc.append("closureNotes", closureNotes);
+                }
                 caseCollection.updateOne(
                         new Document("_id", candidate.getObjectId("_id")),
                         new Document("$inc", new Document("frequency", 1))
-                                .append("$set", new Document("completedAt", Date.from(Instant.now()))));
+                                .append("$set", setDoc));
                 Document updated = caseCollection.find(new Document("_id", candidate.getObjectId("_id"))).first();
                 return mapCase(Objects.requireNonNull(updated));
             }
@@ -238,7 +245,7 @@ public class CaseController extends AbstractController {
                 .append("answeredQuestionIds", answeredIds)
                 .append("title", outcome != null && !outcome.isBlank() ? outcome : "Case")
                 .append("description", "")
-                .append("closureNotes", "")
+                .append("closureNotes", closureNotes)
                 .append("createdAt", Date.from(now))
                 .append("completedAt", Date.from(now));
 
@@ -247,12 +254,30 @@ public class CaseController extends AbstractController {
     }
 
     private Document findRun(String topicId, String formId, String runId) {
-        Document filter = new Document("_id", parseId(runId))
-                .append("topicId", topicId)
-                .append("formId", formId);
-        Document doc = runCollection.find(filter).first();
+        ObjectId objectId = parseId(runId);
+        Document doc = runCollection.find(new Document("_id", objectId)).first();
         if (doc == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Run not found");
+        }
+        String storedTopic = doc.getString("topicId");
+        String storedForm = doc.getString("formId");
+
+        boolean topicMismatch = storedTopic != null && !Objects.equals(storedTopic, topicId);
+        boolean formMismatch = storedForm != null && !Objects.equals(storedForm, formId);
+        if (topicMismatch || formMismatch) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Run not found for provided form");
+        }
+
+        Document patch = new Document();
+        if (storedTopic == null) {
+            patch.append("topicId", topicId);
+        }
+        if (storedForm == null) {
+            patch.append("formId", formId);
+        }
+        if (!patch.isEmpty()) {
+            runCollection.updateOne(new Document("_id", objectId), new Document("$set", patch));
+            doc.putAll(patch);
         }
         return doc;
     }
@@ -288,6 +313,7 @@ public class CaseController extends AbstractController {
                 .status(doc.getString("status"))
                 .startedAt(toInstant(doc.getDate("startedAt")))
                 .closedAt(toInstant(doc.getDate("closedAt")))
+                .closureNotes(doc.getString("closureNotes"))
                 .build();
     }
 
@@ -387,6 +413,7 @@ public class CaseController extends AbstractController {
         }
         Map<String, String> referenceMap = reference.stream()
                 .filter(step -> step.getQuestionId() != null)
+                .filter(step -> step.getAnswer() != null)
                 .collect(Collectors.toMap(
                         step -> normalize(step.getQuestionId()),
                         step -> normalize(step.getAnswer()),
@@ -395,6 +422,7 @@ public class CaseController extends AbstractController {
 
         Map<String, String> candidateMap = candidate.stream()
                 .filter(step -> step.getQuestionId() != null)
+                .filter(step -> step.getAnswer() != null)
                 .collect(Collectors.toMap(
                         step -> normalize(step.getQuestionId()),
                         step -> normalize(step.getAnswer()),

@@ -22,4 +22,5 @@ public class CaseRun {
     private String status; // e.g., "RUNNING", "COMPLETED"
     private Instant startedAt;
     private Instant closedAt;
+    private String closureNotes;
 }

@@ -238,6 +238,24 @@ public class QuestionController extends AbstractController {
         return ResponseEntity.ok(mapDocToQuestion(doc));
     }
 
+    @GetMapping("/{questionId}/children")
+    public ResponseEntity<List<Question>> getSubQuestions(@PathVariable String topicId,
+                                                          @PathVariable String formId,
+                                                          @PathVariable String questionId) {
+        requireForm(topicId, formId);
+
+        MongoCollection<Document> questions = mongoDatabase.getCollection("questions");
+        List<Document> docs = questions.find(new Document("parentQuestionId", questionId)
+                .append("formId", formId))
+                .into(new ArrayList<>());
+
+        List<Question> result = new ArrayList<>();
+        for (Document doc : docs) {
+            result.add(mapDocToQuestion(doc));
+        }
+        return ResponseEntity.ok(result);
+    }
+
     // --- Get all questions for a form ---
     @SuppressWarnings("unchecked")
     @GetMapping

@@ -1,118 +1,210 @@
-# 🧭 HelpOS
+# HelpOS Backend
 
-## 👥 Team Members
-- Miki Mizuki
-- Mattia Leonetti
-- Matteo Iulian Adam
----
+Refugee families arriving in Switzerland often sit down with a volunteer lawyer
+who has minutes to grasp their story and locate the right pathway through
+Swiss, EU, and Dublin regulations. Doing that manually means leafing through
+statutes, hunting for precedent, building timelines, and drafting advice—all
+while the family waits. HelpOS transforms that scramble into a guided, humane
+interview that maps each answer to the law and highlights the next legal steps.
 
-## 🏆 Challenge
-**Hackathon on Crisis Application for GaaP — UNHCR: Virtual Legal Assistance Rights Mapping**
-
-**Challenge Question:**  
-How might we determine the legal status of a refugee for pro bono lawyers, so that their advice can be given more quickly and accurately?
-
-**Context:**  
-Refugees often face complex and multilingual legal systems when arriving in a host country. Pro bono lawyers must currently sift through lengthy documents in various languages to understand which rights apply, leading to time delays and inconsistencies in the advice provided.  
-
-Our goal is to design a tool that structures, accesses, and presents legal information clearly and efficiently—empowering lawyers to provide faster, more reliable, and more accurate legal assistance.
+This repository contains the Spring Boot service that powers the platform. The
+backend exposes REST APIs for structuring legal topics, building guided forms,
+running interactive interviews, and surfacing similar closed cases using MongoDB
+for persistence and Neo4j for relationship tracking.
 
 ---
 
-## 💡 Solution Overview
-We propose a **guided pipeline application** that assists pro bono lawyers in handling refugee cases efficiently.  
-It provides a structured workflow, automatic legal mapping, and document generation to accelerate case preparation and improve legal clarity.
+## What It Does
 
-### 🔄 Pipeline Structure
-
-1. **Open a New Case**  
-   - Initialize a workspace for the refugee/family case.  
-   - Input country of asylum, previous residence, and upload case-related files.
-
-2. **Define Family Members**  
-   - Add details such as name, age, nationality, relationship, and relevant conditions (e.g., medical, educational, employment).  
-   - Optional: auto-extract information from case descriptions using NLP.
-
-3. **Identify Applicable Legal Frameworks**  
-   - Automatically determine relevant laws (Swiss, EU, and international).  
-   - Use multilingual semantic search and summarization to highlight key rights and obligations.
-
-4. **Find Blockers and Required Procedures**  
-   - Generate a checklist of procedures, eligibility criteria, and required documents.  
-   - Identify potential blockers (e.g., Dublin Regulation, missing documents).
-
-5. **Auto-Generate Legal Templates**  
-   - Pre-fill legal forms or letters with collected data.  
-   - Lawyers can edit and add missing details directly in the browser.
-
-6. **Case Summary and Output**  
-   - Display a summary of applicable rights, documents to prepare, and responsible authorities.  
-   - Export a concise report in PDF or DOCX format.
+- **Topic & Form Management** – Create and version the interview flows that
+  legal specialists design for specific subject areas.
+- **Guided Question Trees** – Persist branching questions with answer options,
+  sources, and optional follow-up links to keep interviews consistent.
+- **Case Runs & Aggregation** – Capture each consultation as a run, close it
+  with outcomes and notes, and fold matching runs into aggregated “cases” with
+  frequency tracking.
+- **Similarity Retrieval** – Score runs against historic cases using shared
+  question/answer pairs so lawyers can reference precedent instantly.
+- **Neo4j Mirror** – Sync every topic, form, and question into a graph model for
+  downstream analytics or exploratory search.
 
 ---
 
-## 🧠 Core Features
-- 🗂️ Structured workflow for managing complex asylum cases  
-- 🌍 Multilingual support with automated translation and summarization  
-- ⚖️ Legal text mapping via semantic search  
-- 🧾 Template-based document generation  
-- 📋 Summary table with actionable next steps and deadlines  
+## Tech Stack
+
+| Layer        | Technology                                               |
+|--------------|-----------------------------------------------------------|
+| Language     | Java 21 (compatible with Java 17+)                       |
+| Framework    | Spring Boot 3 (Web, Data MongoDB, Data Neo4j)            |
+| Datastores   | MongoDB Atlas (document data), Neo4j Aura (graph)        |
+| Build Tool   | Gradle with Spring Dependency Management                 |
+| Tooling      | Lombok, JUnit (tests currently disabled), Docker-friendly |
+| Data Seeding | `populate.py` (Python 3, `requests`)                     |
 
 ---
 
-## 🧰 Tech Stack
+## Getting Started
 
-| Layer | Technology |
-|-------|-------------|
-| **Frontend** | React (TypeScript), TailwindCSS |
-| **Backend** | Python (FastAPI / Flask) |
-| **Database** | SQLite (for simplicity) |
-| **Search Engine** | FAISS or ElasticSearch (for semantic legal retrieval) |
-| **NLP/AI Models** | HuggingFace Transformers (multilingual summarization + embeddings) |
-| **Document Generation** | Jinja2 + python-docx / pdfkit |
-| **Translation** | MarianMT / DeepL API |
-| **Deployment** | Vercel (frontend), Google Cloud / Render (backend) |
+### Prerequisites
 
----
+- JDK 21 (or 17+) on your PATH
+- Python 3.9+ if you plan to run the seeding script
+- MongoDB and Neo4j instances (connection URIs configurable)
 
-## 📊 Example Use Case
-**Scenario:**  
-A refugee family arrives in Switzerland:  
-- Father previously worked in an EU country  
-- Mother requires urgent medical treatment  
-- Child needs access to school  
+### Configure Connections
 
-**Our tool:**  
-1. Collects relevant data about the family  
-2. Identifies applicable rights (housing, healthcare, education)  
-3. Flags potential legal blockers  
-4. Suggests next steps and required documentation  
-5. Produces a ready-to-review legal draft for the lawyer  
+Default values live in `src/main/resources/application.properties`. Override
+them with environment variables or a profile-specific properties file:
 
----
+```properties
+helpos.mongo.uri=mongodb://user:pass@localhost:27017/helpos
+helpos.mongo.database=helpos
+helpos.neo4j.uri=neo4j://localhost:7687
+helpos.neo4j.username=neo4j
+helpos.neo4j.password=secret
+```
 
-## 🧩 Future Extensions
-- Confidence scoring for legal clause relevance  
-- “Explain this clause” AI simplification button  
-- Refugee-facing simplified summaries (multi-language)  
-- Integration with UNHCR case systems  
+### Run the API
+
+```bash
+./gradlew bootRun       # macOS / Linux
+gradlew.bat bootRun     # Windows
+```
+
+The service starts on `http://localhost:8080/`.
 
 ---
 
-## 🖼️ Screenshots & Demo
-*(Add screenshots or link to demo video once available)*
+## API Reference
+
+The core resources are Topics → Forms → Questions → Runs → Cases. Paths are
+relative to `/topics/{topicId}/forms/{formId}` unless otherwise noted.
+
+### Topics
+- `GET /topics` – List every topic. Response fields: `id`, `name`,
+  `description`.
+- `POST /topics` – Create a topic. Body:
+  ```json
+  { "name": "Health & Medical Protection", "description": "..." }
+  ```
+  Mirrors the topic as a Neo4j node.
+- `GET /topics/{topicId}` – Fetch a single topic document.
+
+### Forms
+- `GET /topics/{topicId}/forms` – Return all forms below the topic. Each form
+  contains `id`, `title`, `description`, `version`, `active`, `questionIds`,
+  `tags`.
+- `POST /topics/{topicId}/forms` – Create a form or new version. Body fields:
+  - `title` (string, required)
+  - `description` (string, optional)
+  - `version` (string, optional)
+  - `tags` (array of strings, optional)
+  - `questionIds` (array of question IDs, optional)
+  - `previousVersionId` (string, optional; marks previous version inactive)
+- `GET /topics/{topicId}/forms/{formId}` – Retrieve metadata for a single form.
+
+### Questions (guided only)
+- `GET /topics/{topicId}/forms/{formId}/questions` – List questions in order.
+  Response includes `answerOptions`, `answerType`, `source`, `tags`.
+- `POST /topics/{topicId}/forms/{formId}/questions` – Create a root-level
+  question. Required payload fields:
+  - `text` – Question prompt.
+  - `source` – Single URL string pointing to the controlling law.
+  - `answerType` – `RADIO`, `CHECKBOX`, etc.
+  - `answerOptions` – Array of objects with:
+    - `id` (stable identifier)
+    - `label` (display text)
+    - `terminal` (boolean)
+    - optional `nextQuestionId` (links to follow-up)
+    - optional `legalReference` (inline citation text)
+  - Optional `tags` array.
+- `POST /topics/{topicId}/forms/{formId}/questions/{parentQuestionId}` – Add a
+  subquestion branching from a parent answer. Body must include
+  `parentAnswerId` to identify the option that triggers the new question. The
+  endpoint reuses the same payload structure as above.
+- `GET /topics/{topicId}/forms/{formId}/questions/{questionId}` – Fetch a single
+  question by ID.
+- `GET /topics/{topicId}/forms/{formId}/questions/{questionId}/children` – List
+  immediate follow-up questions.
+
+### Runs (live interviews)
+- `POST /topics/{topicId}/forms/{formId}/runs`
+  - Purpose: start a new guided interview.
+  - Body fields: `profileId`, optional `status` (defaults to `RUNNING`),
+    optional array of `steps`, optional `startedAt` timestamp.
+  - Response: persisted run with generated `_id` and timestamps.
+- `GET /topics/{topicId}/forms/{formId}/runs/{runId}` – Get the run plus all
+  recorded steps (`questionId`, `answer`, `notes`, `attachmentIds`, `answeredAt`).
+- `PUT /topics/{topicId}/forms/{formId}/runs/{runId}` – Update an in-progress
+  run. Any subset of fields may be supplied; unknown fields are ignored.
+- `POST /topics/{topicId}/forms/{formId}/runs/{runId}/close` – Close the run.
+  Rules:
+  - At least one step must exist (either already stored or supplied in the body).
+  - `outcome` must be non-empty (taken from the body or the stored run).
+  - Optional `closureNotes` capture narrative findings.
+  - Marks the run as `COMPLETED`, writes `closedAt`, and upserts an aggregated
+    case (see below).
+- `GET /topics/{topicId}/forms/{formId}/runs/{runId}/similar` – Compare the run
+  with historical cases. Returns up to 10 matches ordered by ascending count of
+  shared question/answer pairs, breaking ties with `frequency` (descending).
+
+### Cases (aggregated history)
+- `GET /topics/{topicId}/forms/{formId}/cases` – List closed cases, sorted
+  by descending `frequency`. Each entry contains:
+  - `id`, `title`, `description`, `status`
+  - `outcome`, `closureNotes`, `formVersion`
+  - `steps` (final snapshot), `answeredQuestionIds`
+  - `createdAt`, `completedAt`, `frequency`, `profileId`
+- `GET /topics/{topicId}/forms/{formId}/cases/{caseId}` – Retrieve a single
+  case document.
 
 ---
 
-## 🗣️ Pitch Materials
-All pitch materials are located in the [`/pitch`](./pitch) folder.  
-Include your presentation slides and demo video before the final submission.
+## Database Seeds
+
+Kick-start the system with curated topics, forms, and guided questions:
+
+```bash
+python populate.py
+# or
+HELPOS_BASE_URL=https://staging.api.helpos.org python populate.py
+```
+
+The script is idempotent. It reuses existing topics/forms/questions when their
+structure matches, and fails fast if guided answer options drift from the
+expected configuration.
 
 ---
 
-## 📜 License
-This project is open source and licensed under the [MIT License](./LICENSE).
+## Project Structure
+
+```
+src/main/java/ch/helpos/backend/
+├── config/            # Mongo & web configuration
+├── controller/        # REST controllers for topics, forms, questions, cases
+├── models/            # MongoDB documents (Lombok-powered)
+└── HelpOsBackendApplication.java
+
+src/main/resources/
+└── application.properties
+
+populate.py            # Idempotent data seeder (guided questions only)
+```
 
 ---
 
-**Developed for the Hackathon on Crisis Applications (Oct 30 – Nov 1, 2025) at the University of Zurich’s Digital Society Initiative, in collaboration with UNHCR.**
+## Development Notes
+
+- Tests are currently disabled in `build.gradle`. Re-enable by removing
+  `tasks.withType(Test) { enabled = false }` and adding fixtures.
+- All endpoints expect MongoDB ObjectId strings for path parameters.
+- Every topic, form, and question is mirrored into Neo4j; ensure your database
+  credentials allow Bolt+TLS connections.
+- Similarity scoring uses the set of answered `questionId` plus normalized
+  `answer` values. Answers left blank are ignored.
+
+---
+
+HelpOS is distributed under the [MIT License](./LICENSE). Questions or ideas?
+Open an issue and help us speed critical legal support to the people who need it
+most.
